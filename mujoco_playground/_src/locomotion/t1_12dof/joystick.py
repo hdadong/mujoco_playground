@@ -52,6 +52,8 @@ def default_config() -> config_dict.ConfigDict:
       reward_config=config_dict.create(
           scales=config_dict.create(
               survival=0.25,
+              tracking_joint_pos=3.0,
+              #tracking_joint_vel=0.2,
               tracking_lin_vel_x=1.0,
               tracking_lin_vel_y=1.0,
               tracking_ang_vel=2.0,  # original 0.5
@@ -67,16 +69,19 @@ def default_config() -> config_dict.ConfigDict:
               root_acc=-1.0e-4,
               action_rate=-1.0 / 2,  # original -1.0
               dof_pos_limits=-1.0,
-              collision=-1.0 * 10.0,  # original -1.0
-              feet_slip=-0.1,
+              collision=0.0, #-1.0 * 10.0,  # original -1.0
+              feet_slip=-0.0,
               feet_vel_z=0.0,     # disabled in Isaac config
-              feet_yaw_diff=-1.0,
-              feet_yaw_mean=-1.0,
-              feet_roll=-0.1 * 10.0,  # original -0.1
-              feet_distance=-1.0 * 10.0,  # original -1.0
-              feet_swing=3.0,
+              feet_yaw_diff=-0.0,
+              feet_yaw_mean=-0.0,
+              feet_roll=-0.0 * 0,  # original -0.1
+              feet_distance=0.0 * 0,  # original -1.0
+              feet_swing=0.0,
           ),
           tracking_sigma = 0.25,
+          tracking_joint_pos_sigma = 0.25,
+          #tracking_joint_vel_sigma = 0.25,
+
           base_height_target = 0.68,
           swing_period = 0.2,
       ),
@@ -85,9 +90,9 @@ def default_config() -> config_dict.ConfigDict:
           interval_range=[5.0, 10.0],
           magnitude_range=[0.1, 1.0],
       ),
-      lin_vel_x=[-1.0, 1.0],
-      lin_vel_y=[-0.8, 0.8],
-      ang_vel_yaw=[-1.0, 1.0],
+      lin_vel_x=[0.2, 1.0],
+      lin_vel_y=[-0.0, 0.0],
+      ang_vel_yaw=[-0.0, 0.0],
   )
 
 
@@ -105,6 +110,10 @@ class Joystick(t1_base.T1LowDimEnv):
         config=config,
         config_overrides=config_overrides,
     )
+    ref_data = np.load('/home/admin123/booster_gym/env_0_data_0.npz')
+    self._ref_joint_pos = jp.array(ref_data['dof_pos'])
+    self._ref_joint_vel = jp.array(ref_data['dof_vel'])
+
     self._post_init()
 
   def _post_init(self) -> None:
@@ -213,7 +222,7 @@ class Joystick(t1_base.T1LowDimEnv):
 
     # Phase, freq=U(1.25, 1.75)
     rng, key = jax.random.split(rng)
-    gait_freq = jax.random.uniform(key, (1,), minval=1.25, maxval=1.75)
+    gait_freq = jax.random.uniform(key, (1,), minval=1.5, maxval=1.5)
     phase_dt = 2 * jp.pi * self.dt * gait_freq
     phase = jp.array([0, jp.pi])
 
@@ -427,6 +436,17 @@ class Joystick(t1_base.T1LowDimEnv):
     # We will disable noisy_linvel
     noisy_linvel = jp.zeros_like(noisy_linvel)
 
+    ref_pos = jp.where(
+        jp.linalg.norm(info["command"]) > 0.01,
+        self._ref_joint_pos[info["step"]],
+        self._default_pose,
+    )
+
+    ref_vel = jp.where(
+        jp.linalg.norm(info["command"]) > 0.01,
+        self._ref_joint_vel[info["step"]],
+        jp.zeros_like(joint_vel),
+    )
     state = jp.hstack([
         noisy_gravity,  # 3
         noisy_gyro,  # 3
@@ -435,6 +455,7 @@ class Joystick(t1_base.T1LowDimEnv):
         noisy_joint_angles - self._default_pose,  # 12
         noisy_joint_vel * 0.1,  # 12
         info["last_act"],  # 12
+        ref_pos - joint_angles, # 12
     ])
 
     accelerometer = self.get_accelerometer(data)
@@ -481,6 +502,8 @@ class Joystick(t1_base.T1LowDimEnv):
     return {
         # -------- positive terms --------
         "survival": jp.array(1.0),
+        "tracking_joint_pos": self._reward_tracking_joint_pos(data.qpos[7:], info["step"], cmd),
+        #"tracking_joint_vel": self._reward_tracking_joint_vel(data.qvel[6:], info["step"], cmd),
         "tracking_lin_vel_x": self._reward_tracking_lin_vel_axis(0, cmd, lin_f),
         "tracking_lin_vel_y": self._reward_tracking_lin_vel_axis(1, cmd, lin_f),
         "tracking_ang_vel": self._reward_tracking_ang_vel(cmd, ang_f),
@@ -510,6 +533,27 @@ class Joystick(t1_base.T1LowDimEnv):
 
 
   # Tracking rewards.
+  def _reward_tracking_joint_pos(self, joint_pos, step, command) -> jax.Array:
+    ref_pos = jp.where(
+        jp.linalg.norm(command) > 0.01,
+        self._ref_joint_pos[step],
+        self._default_pose,
+    )
+    err = jp.square(joint_pos - ref_pos)
+
+    return jp.sum(jp.exp(-err / self._config.reward_config.tracking_joint_pos_sigma))
+
+
+  # def _reward_tracking_joint_vel(self, joint_vel, step, command) -> jax.Array:
+    # ref_vel = jp.where(
+    #     jp.linalg.norm(command) > 0.01,
+    #     self._ref_joint_vel[step],
+    #     jp.zeros_like(joint_vel),
+    # )
+    # err = jp.square(joint_vel - ref_vel)
+
+    # return jp.sum(jp.exp(-err / self._config.reward_config.tracking_joint_vel_sigma))
+
 
   def _reward_tracking_lin_vel_axis(
       self, axis: int, command: jax.Array, local_linvel: jax.Array
